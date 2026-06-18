@@ -2,7 +2,7 @@
 
 A hard-coded, deterministic finite-state machine (no LLM) that watches the
 agreement between Quant Scouts and Text Scouts and decides how much analytical
-effort the Aggregator should spend: ``USE_MEDIUM`` normally, ``USE_HIGH`` when
+effort the Aggregator should spend: ``ROUTE_PRO`` normally, ``ROUTE_GPT`` when
 signals conflict. Hysteresis prevents flag chatter ("дребезг").
 """
 from __future__ import annotations
