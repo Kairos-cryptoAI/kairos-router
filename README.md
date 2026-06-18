@@ -34,4 +34,4 @@ python -m kairos_router          # consumes the bus, emits RouterDecision
 Consumes `kairos.market.snapshot` + `kairos.sentiment.signal`; emits `kairos.router.decision`.
 
 ---
-Part of the [Kairos](https://github.com/TheLitis/kairos) system. MIT licensed.
+Part of the [Kairos](https://github.com/Kairos-cryptoAI/kairos) system. MIT licensed.
