@@ -8,9 +8,9 @@ def test_escalates_to_high_after_threshold_conflicts():
     sym = "BTCUSD"
     for _ in range(3):
         st = fsm.update(sym, Side.SHORT, Side.LONG)
-        assert st.mode is RouterMode.USE_MEDIUM  # not yet
+        assert st.mode is RouterMode.ROUTE_PRO  # not yet
     st = fsm.update(sym, Side.SHORT, Side.LONG)  # 4th consecutive conflict
-    assert st.mode is RouterMode.USE_HIGH
+    assert st.mode is RouterMode.ROUTE_GPT
 
 
 def test_a_single_calm_tick_resets_conflict_streak():
@@ -22,7 +22,7 @@ def test_a_single_calm_tick_resets_conflict_streak():
     assert fsm.state(sym).conflict_streak == 0
     for _ in range(3):
         st = fsm.update(sym, Side.SHORT, Side.LONG)
-    assert st.mode is RouterMode.USE_MEDIUM  # only 3 since reset
+    assert st.mode is RouterMode.ROUTE_PRO  # only 3 since reset
 
 
 def test_requires_full_calm_window_to_fall_back():
@@ -30,12 +30,12 @@ def test_requires_full_calm_window_to_fall_back():
     sym = "BTCUSD"
     for _ in range(4):
         fsm.update(sym, Side.SHORT, Side.LONG)
-    assert fsm.state(sym).mode is RouterMode.USE_HIGH
+    assert fsm.state(sym).mode is RouterMode.ROUTE_GPT
     for _ in range(9):
         st = fsm.update(sym, Side.LONG, Side.LONG)
-        assert st.mode is RouterMode.USE_HIGH  # still high after 9 calm ticks
+        assert st.mode is RouterMode.ROUTE_GPT  # still high after 9 calm ticks
     st = fsm.update(sym, Side.LONG, Side.LONG)  # 10th calm tick
-    assert st.mode is RouterMode.USE_MEDIUM
+    assert st.mode is RouterMode.ROUTE_PRO
 
 
 def test_brief_calm_does_not_drop_high_then_resumes():
@@ -46,5 +46,5 @@ def test_brief_calm_does_not_drop_high_then_resumes():
     for _ in range(5):
         fsm.update(sym, Side.LONG, Side.LONG)  # 5 calm, not enough to fall back
     st = fsm.update(sym, Side.SHORT, Side.LONG)  # conflict resumes
-    assert st.mode is RouterMode.USE_HIGH
+    assert st.mode is RouterMode.ROUTE_GPT
     assert st.calm_streak == 0

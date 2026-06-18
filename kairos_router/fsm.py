@@ -3,6 +3,10 @@
 The FSM is intentionally side-effect free and trivially unit-testable: feed it
 ticks, read its mode. The async :mod:`kairos_router.service` wraps it around the
 message bus.
+
+DeepSeek-first routing:
+  * ``ROUTE_PRO`` — routine flow handled by DeepSeek-V4-Pro.
+  * ``ROUTE_GPT`` — escalation to GPT-5.5 when signals keep conflicting.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ from .conflict import is_conflict
 
 @dataclass
 class SymbolState:
-    mode: RouterMode = RouterMode.USE_MEDIUM
+    mode: RouterMode = RouterMode.ROUTE_PRO
     conflict_streak: int = 0
     calm_streak: int = 0
 
@@ -26,8 +30,8 @@ class RouterFSM:
     """Per-symbol hysteresis machine.
 
     Transitions:
-      * USE_MEDIUM -> USE_HIGH  after ``conflict_threshold`` consecutive conflict ticks.
-      * USE_HIGH   -> USE_MEDIUM after ``calm_threshold`` consecutive calm ticks.
+      * ROUTE_PRO -> ROUTE_GPT  after ``conflict_threshold`` consecutive conflict ticks.
+      * ROUTE_GPT -> ROUTE_PRO  after ``calm_threshold`` consecutive calm ticks.
     """
 
     conflict_threshold: int = 4
@@ -46,12 +50,13 @@ class RouterFSM:
             st.calm_streak += 1
             st.conflict_streak = 0
 
-        if st.mode is RouterMode.USE_MEDIUM and st.conflict_streak >= self.conflict_threshold:
-            st.mode = RouterMode.USE_HIGH
-        elif st.mode is RouterMode.USE_HIGH and st.calm_streak >= self.calm_threshold:
-            st.mode = RouterMode.USE_MEDIUM
+        if st.mode is RouterMode.ROUTE_PRO and st.conflict_streak >= self.conflict_threshold:
+            st.mode = RouterMode.ROUTE_GPT
+        elif st.mode is RouterMode.ROUTE_GPT and st.calm_streak >= self.calm_threshold:
+            st.mode = RouterMode.ROUTE_PRO
         return st
 
     @staticmethod
     def effort_for(mode: RouterMode) -> ReasoningEffort:
-        return ReasoningEffort.HIGH if mode is RouterMode.USE_HIGH else ReasoningEffort.MEDIUM
+        # ROUTE_GPT -> GPT-5.5 (high); ROUTE_PRO -> DeepSeek-V4-Pro (medium).
+        return ReasoningEffort.HIGH if mode is RouterMode.ROUTE_GPT else ReasoningEffort.MEDIUM
