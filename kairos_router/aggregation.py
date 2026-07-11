@@ -31,8 +31,9 @@ class SignalWindow:
 
     def text_bias(self, symbol: str, *, now: float | None = None) -> Side:
         now = now if now is not None else time.time()
-        points = [s for (ts, s) in self._sentiment.get(symbol, []) if now - ts <= self.sentiment_ttl_s]
-        self._sentiment[symbol] = [(ts, s) for (ts, s) in self._sentiment.get(symbol, []) if now - ts <= self.sentiment_ttl_s]
-        if not points:
+        fresh = [(ts, s) for (ts, s) in self._sentiment.get(symbol, []) if now - ts <= self.sentiment_ttl_s]
+        self._sentiment[symbol] = fresh
+        if not fresh:
             return Side.FLAT
+        points = [s for (_ts, s) in fresh]
         return sentiment_to_side(sum(points) / len(points), self.deadband)
