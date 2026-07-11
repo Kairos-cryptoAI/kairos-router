@@ -43,6 +43,9 @@ class RouterService:
         async for env in self.bus.subscribe(Topics.MARKET_SNAPSHOT, group="router", consumer="snap"):
             try:
                 snap = MarketSnapshot.model_validate(env.payload)
+                if not self.settings.symbol_allowed(snap.symbol):
+                    log.warning("router.symbol_rejected", symbol=snap.symbol)
+                    continue
                 self.window.set_quant_bias(snap.symbol, snap.quant_bias)
                 qb = snap.quant_bias
                 tb = self.window.text_bias(snap.symbol)
