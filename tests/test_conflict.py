@@ -1,4 +1,5 @@
 from kairos_core.enums import Side
+
 from kairos_router.conflict import is_conflict, sentiment_to_side
 
 
