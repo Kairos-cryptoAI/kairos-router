@@ -1,4 +1,5 @@
 """Pure helpers that turn raw signals into a directional bias and detect conflict."""
+
 from __future__ import annotations
 
 from kairos_core.enums import Side

@@ -1,5 +1,7 @@
 """The hysteresis behaviour is the whole point of Layer 2 — lock it down."""
+
 from kairos_core.enums import RouterMode, Side
+
 from kairos_router.fsm import RouterFSM
 
 
@@ -48,3 +50,14 @@ def test_brief_calm_does_not_drop_high_then_resumes():
     st = fsm.update(sym, Side.SHORT, Side.LONG)  # conflict resumes
     assert st.mode is RouterMode.ROUTE_GPT
     assert st.calm_streak == 0
+
+
+def test_preview_is_transactional_until_committed():
+    fsm = RouterFSM(conflict_threshold=1)
+
+    preview = fsm.preview("BTCUSDT", Side.SHORT, Side.LONG)
+
+    assert preview.mode is RouterMode.ROUTE_GPT
+    assert "BTCUSDT" not in fsm._states
+    fsm.commit("BTCUSDT", preview)
+    assert fsm.state("BTCUSDT").mode is RouterMode.ROUTE_GPT
