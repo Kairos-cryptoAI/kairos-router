@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from kairos_core.enums import Side
+
+
+class SignalRelation(StrEnum):
+    """Stable relation labels consumed by the hysteresis FSM."""
+
+    CONFLICT = "conflict"
+    AGREEMENT = "agreement"
+    ABSTAIN = "abstain"
 
 
 def sentiment_to_side(net_sentiment: float, deadband: float = 0.25) -> Side:
@@ -22,3 +32,12 @@ def is_conflict(quant_bias: Side, text_bias: Side) -> bool:
     if quant_bias is Side.FLAT or text_bias is Side.FLAT:
         return False
     return quant_bias is not text_bias
+
+
+def signal_relation(quant_bias: Side, text_bias: Side) -> SignalRelation:
+    """Classify a pair without treating absent direction as calm agreement."""
+    if quant_bias is Side.FLAT or text_bias is Side.FLAT:
+        return SignalRelation.ABSTAIN
+    if quant_bias is text_bias:
+        return SignalRelation.AGREEMENT
+    return SignalRelation.CONFLICT

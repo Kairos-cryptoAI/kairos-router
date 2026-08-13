@@ -61,3 +61,23 @@ def test_preview_is_transactional_until_committed():
     assert "BTCUSDT" not in fsm._states
     fsm.commit("BTCUSDT", preview)
     assert fsm.state("BTCUSDT").mode is RouterMode.ROUTE_GPT
+
+
+def test_abstention_resets_consecutive_streaks_without_deescalating():
+    fsm = RouterFSM(conflict_threshold=2, calm_threshold=2)
+    fsm.update("BTCUSDT", Side.SHORT, Side.LONG)
+    state = fsm.update("BTCUSDT", Side.SHORT, Side.FLAT)
+
+    assert state.mode is RouterMode.ROUTE_PRO
+    assert state.conflict_streak == 0
+    assert state.calm_streak == 0
+
+    fsm.update("BTCUSDT", Side.SHORT, Side.LONG)
+    fsm.update("BTCUSDT", Side.SHORT, Side.LONG)
+    assert fsm.state("BTCUSDT").mode is RouterMode.ROUTE_GPT
+
+    state = fsm.update("BTCUSDT", Side.FLAT, Side.LONG)
+
+    assert state.mode is RouterMode.ROUTE_GPT
+    assert state.conflict_streak == 0
+    assert state.calm_streak == 0

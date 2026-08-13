@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 
 from kairos_core.enums import ReasoningEffort, RouterMode, Side
 
-from .conflict import is_conflict
+from .conflict import SignalRelation, signal_relation
 
 
 @dataclass
@@ -45,12 +45,18 @@ class RouterFSM:
         return state
 
     def _advance(self, state: SymbolState, quant_bias: Side, text_bias: Side) -> SymbolState:
-        if is_conflict(quant_bias, text_bias):
+        relation = signal_relation(quant_bias, text_bias)
+        if relation is SignalRelation.CONFLICT:
             state.conflict_streak += 1
             state.calm_streak = 0
-        else:
+        elif relation is SignalRelation.AGREEMENT:
             state.calm_streak += 1
             state.conflict_streak = 0
+        else:
+            # Missing/neutral evidence is an abstention, not evidence of calm.
+            # Reset consecutiveness while preserving an escalated mode.
+            state.conflict_streak = 0
+            state.calm_streak = 0
 
         if state.mode is RouterMode.ROUTE_PRO and state.conflict_streak >= self.conflict_threshold:
             state.mode = RouterMode.ROUTE_GPT
@@ -60,5 +66,5 @@ class RouterFSM:
 
     @staticmethod
     def effort_for(mode: RouterMode) -> ReasoningEffort:
-        # ROUTE_GPT -> GPT-5.6 Sol (high); ROUTE_PRO -> DeepSeek-V4-Pro (medium).
+        # Concrete providers/models are selected downstream by explicit workload role.
         return ReasoningEffort.HIGH if mode is RouterMode.ROUTE_GPT else ReasoningEffort.MEDIUM

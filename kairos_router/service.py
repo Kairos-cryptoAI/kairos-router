@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 from kairos_core.bus import BusEnvelope, MessageBus, build_bus
 from kairos_core.contracts import MarketSnapshot, RouterDecision, SentimentSignal
-from kairos_core.enums import ImpactDirection, RouterMode, SystemMode
+from kairos_core.enums import RouterMode, Side, SystemMode
 from kairos_core.logging import configure_logging, get_logger
 from kairos_core.topics import Topics
 
-from .aggregation import SignalWindow
+from .aggregation import SignalWindow, TextAggregate
 from .config import RouterSettings
 from .fsm import RouterFSM, SymbolState
 
@@ -29,14 +31,25 @@ class RouterService:
         settings: RouterSettings | None = None,
         *,
         bus: MessageBus | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings or RouterSettings()
         self.bus = bus if bus is not None else build_bus(self.settings)
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.fsm = RouterFSM(self.settings.conflict_threshold, self.settings.calm_threshold)
-        self.window = SignalWindow(self.settings.sentiment_ttl_s, self.settings.sentiment_deadband)
+        self.window = SignalWindow(
+            sentiment_ttl_s=self.settings.sentiment_ttl_s,
+            deadband=self.settings.sentiment_deadband,
+            min_confidence=self.settings.sentiment_min_confidence,
+            max_evidence=self.settings.max_sentiment_evidence,
+            max_points_per_topic=self.settings.processed_cache_size,
+        )
         self.system_mode = SystemMode.NORMAL
         self._processed_snapshots: OrderedDict[str, None] = OrderedDict()
         self._processed_sentiments: OrderedDict[str, None] = OrderedDict()
+        self._snapshot_symbols: OrderedDict[str, str] = OrderedDict()
+        self._sentiment_topics: OrderedDict[str, str] = OrderedDict()
+        self._snapshot_watermarks: dict[str, datetime] = {}
 
     def _remember(self, cache: OrderedDict[str, None], message_id: str) -> None:
         cache[message_id] = None
@@ -44,15 +57,102 @@ class RouterService:
         while len(cache) > self.settings.processed_cache_size:
             cache.popitem(last=False)
 
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.utcoffset() is None:
+            raise ValueError("router clock must return a timezone-aware datetime")
+        return now.astimezone(UTC)
+
+    def _event_time_rejection(
+        self,
+        produced_at: datetime,
+        *,
+        now: datetime,
+        ttl_s: float,
+        label: str,
+    ) -> str | None:
+        if produced_at.utcoffset() is None:
+            return f"{label} timestamp is not timezone-aware"
+        produced_at = produced_at.astimezone(UTC)
+        if produced_at < now - timedelta(seconds=ttl_s):
+            return f"stale {label}"
+        if produced_at > now + timedelta(seconds=self.settings.event_future_tolerance_s):
+            return f"future-dated {label}"
+        return None
+
     def _process_sentiment(self, envelope: BusEnvelope) -> None:
         signal = SentimentSignal.model_validate(envelope.payload)
+        symbol = signal.topic.strip().upper() if self.settings.symbol_allowed(signal.topic) else "*"
+        prior_topic = self._sentiment_topics.get(signal.message_id)
+        if prior_topic is not None and prior_topic != symbol:
+            raise ValueError(f"sentiment message_id {signal.message_id!r} was reused across topics")
         if signal.message_id in self._processed_sentiments:
             return
+        if self.window.has_message(signal.message_id):
+            raise ValueError(f"sentiment message_id {signal.message_id!r} is already retained")
+        rejection = self._event_time_rejection(
+            signal.produced_at,
+            now=self._now(),
+            ttl_s=self.settings.sentiment_ttl_s,
+            label="sentiment",
+        )
+        if rejection is not None:
+            log.warning(
+                "router.sentiment_rejected",
+                sentiment_id=signal.message_id,
+                reason=rejection,
+            )
+            self._remember(self._processed_sentiments, signal.message_id)
+            self._remember_sentiment_identity(signal.message_id, symbol)
+            return
         # An exact configured market is symbol-specific; news topics remain broadcasts.
-        symbol = signal.topic if self.settings.symbol_allowed(signal.topic) else "*"
-        score = signal.sentiment if signal.impact is not ImpactDirection.NEUTRAL else 0.0
-        self.window.add_sentiment(symbol, score)
+        self.window.add_sentiment(
+            symbol,
+            message_id=signal.message_id,
+            produced_at=signal.produced_at,
+            sentiment=signal.sentiment,
+            impact=signal.impact,
+            confidence=signal.confidence,
+        )
         self._remember(self._processed_sentiments, signal.message_id)
+        self._remember_sentiment_identity(signal.message_id, symbol)
+
+    def _trim_identity_map(self, cache: OrderedDict[str, str]) -> None:
+        while len(cache) > self.settings.processed_cache_size:
+            cache.popitem(last=False)
+
+    def _remember_sentiment_identity(self, message_id: str, symbol: str) -> None:
+        self._sentiment_topics[message_id] = symbol
+        while len(self._sentiment_topics) > self.settings.processed_cache_size:
+            evicted_id, evicted_symbol = self._sentiment_topics.popitem(last=False)
+            self.window.discard(evicted_symbol, evicted_id)
+
+    def _snapshot_rejection(self, snapshot: MarketSnapshot, *, now: datetime) -> str | None:
+        """Return why a snapshot must not advance hysteresis, if any."""
+        rejection = self._event_time_rejection(
+            snapshot.produced_at,
+            now=now,
+            ttl_s=self.settings.snapshot_ttl_s,
+            label="snapshot",
+        )
+        if rejection is not None:
+            return rejection
+        produced_at = snapshot.produced_at.astimezone(UTC)
+        # Clock-skew tolerance is an ingestion bound, not permission to make a
+        # decision from evidence that postdates the decision evaluation time.
+        if produced_at > now:
+            return "snapshot postdates routing evaluation time"
+        watermark = self._snapshot_watermarks.get(snapshot.symbol)
+        if watermark is not None and produced_at <= watermark:
+            return "out-of-order snapshot"
+        return None
+
+    def _text_aggregate(self, snapshot: MarketSnapshot) -> TextAggregate:
+        """Prefer fresh symbol evidence; use broadcast only when none exists."""
+        specific = self.window.aggregate(snapshot.symbol, as_of=snapshot.produced_at)
+        if specific.has_relevant_evidence:
+            return specific
+        return self.window.aggregate("*", as_of=snapshot.produced_at)
 
     async def _consume_sentiment(self) -> None:
         async for envelope in self.bus.subscribe(
@@ -96,24 +196,59 @@ class RouterService:
 
     async def _process_snapshot(self, envelope: BusEnvelope) -> None:
         snapshot = MarketSnapshot.model_validate(envelope.payload)
+        normalized_symbol = snapshot.symbol.strip().upper()
+        prior_symbol = self._snapshot_symbols.get(snapshot.message_id)
+        if prior_symbol is not None and prior_symbol != normalized_symbol:
+            raise ValueError(f"snapshot message_id {snapshot.message_id!r} was reused across symbols")
         if snapshot.message_id in self._processed_snapshots:
             return
         if not self.settings.symbol_allowed(snapshot.symbol):
             log.warning("router.symbol_rejected", symbol=snapshot.symbol)
             self._remember(self._processed_snapshots, snapshot.message_id)
+            self._snapshot_symbols[snapshot.message_id] = normalized_symbol
+            self._trim_identity_map(self._snapshot_symbols)
+            return
+        snapshot = snapshot.model_copy(update={"symbol": normalized_symbol})
+
+        now = self._now()
+        rejection = self._snapshot_rejection(snapshot, now=now)
+        if rejection is not None:
+            log.warning(
+                "router.snapshot_rejected",
+                symbol=snapshot.symbol,
+                snapshot_id=snapshot.message_id,
+                reason=rejection,
+            )
+            self._remember(self._processed_snapshots, snapshot.message_id)
+            self._snapshot_symbols[snapshot.message_id] = snapshot.symbol
+            self._trim_identity_map(self._snapshot_symbols)
             return
 
-        self.window.set_quant_bias(snapshot.symbol, snapshot.quant_bias)
         quant_bias = snapshot.quant_bias
-        text_bias = self.window.text_bias(snapshot.symbol)
-        if text_bias.value == "FLAT":
-            text_bias = self.window.text_bias("*")
+        text = self._text_aggregate(snapshot)
+        text_bias = text.bias
 
         # Keep the transition provisional until the outbound publish succeeds.
         state = self.fsm.preview(snapshot.symbol, quant_bias, text_bias)
+        if quant_bias is Side.FLAT or text_bias is Side.FLAT:
+            self.fsm.commit(snapshot.symbol, state)
+            self._snapshot_watermarks[snapshot.symbol] = snapshot.produced_at.astimezone(UTC)
+            log.warning(
+                "router.decision_abstained",
+                symbol=snapshot.symbol,
+                quant_bias=quant_bias.value,
+                text_bias=text_bias.value,
+                sentiment_ids=list(text.sentiment_ids),
+                reason="directional quant and confidence-calibrated text evidence are both required",
+            )
+            self._remember(self._processed_snapshots, snapshot.message_id)
+            self._snapshot_symbols[snapshot.message_id] = snapshot.symbol
+            self._trim_identity_map(self._snapshot_symbols)
+            return
         blocked_reason = self._blocked_reason(state)
         if blocked_reason is not None:
             self.fsm.commit(snapshot.symbol, state)
+            self._snapshot_watermarks[snapshot.symbol] = snapshot.produced_at.astimezone(UTC)
             log.warning(
                 "router.decision_suppressed",
                 symbol=snapshot.symbol,
@@ -122,10 +257,13 @@ class RouterService:
                 reason=blocked_reason,
             )
             self._remember(self._processed_snapshots, snapshot.message_id)
+            self._snapshot_symbols[snapshot.message_id] = snapshot.symbol
+            self._trim_identity_map(self._snapshot_symbols)
             return
 
         decision = RouterDecision(
             message_id=f"router:{snapshot.message_id}",
+            produced_at=now,
             correlation_id=snapshot.correlation_id or snapshot.message_id,
             causation_id=snapshot.message_id,
             source=self.settings.service_name,
@@ -138,13 +276,18 @@ class RouterService:
             text_bias=text_bias,
             rationale=(
                 f"conflict={state.conflict_streak} calm={state.calm_streak} "
+                f"text_score={text.score:.3f} text_confidence={text.confidence:.3f} "
                 f"system_mode={self.system_mode.value}"
             ),
             snapshot_id=snapshot.message_id,
+            sentiment_ids=list(text.sentiment_ids),
         )
         await self.bus.publish(Topics.ROUTER_DECISION, decision)
         self.fsm.commit(snapshot.symbol, state)
+        self._snapshot_watermarks[snapshot.symbol] = snapshot.produced_at.astimezone(UTC)
         self._remember(self._processed_snapshots, snapshot.message_id)
+        self._snapshot_symbols[snapshot.message_id] = snapshot.symbol
+        self._trim_identity_map(self._snapshot_symbols)
         log.info(
             "router.decision",
             symbol=snapshot.symbol,
