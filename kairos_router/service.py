@@ -17,6 +17,7 @@ from kairos_core.contracts import MarketSnapshot, RouterDecision, SentimentSigna
 from kairos_core.enums import RouterMode, Side, SystemMode
 from kairos_core.logging import configure_logging, get_logger
 from kairos_core.topics import Topics
+from kairos_persistence import DurableMessageBus
 
 from .aggregation import SignalWindow, TextAggregate
 from .config import RouterSettings
@@ -34,7 +35,15 @@ class RouterService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings or RouterSettings()
-        self.bus = bus if bus is not None else build_bus(self.settings)
+        if bus is not None:
+            self.bus = bus
+        else:
+            transport = build_bus(self.settings)
+            self.bus = (
+                transport
+                if self.settings.bus_backend == "memory"
+                else DurableMessageBus(transport, service_name=self.settings.service_name)
+            )
         self._clock = clock or (lambda: datetime.now(UTC))
         self.fsm = RouterFSM(self.settings.conflict_threshold, self.settings.calm_threshold)
         self.window = SignalWindow(
