@@ -13,13 +13,20 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from kairos_core.bus import BusEnvelope, MessageBus, build_bus
-from kairos_core.contracts import MarketSnapshot, RouterDecision, SentimentSignal
-from kairos_core.enums import RouterMode, Side, SystemMode
+from kairos_core.contracts import (
+    CandidateRouteV1,
+    MarketSnapshot,
+    RouterDecision,
+    SentimentSignal,
+    StrategyIntentV1,
+)
+from kairos_core.enums import CandidateReviewTier, RouterMode, Side, SystemMode, TradingMode
 from kairos_core.logging import configure_logging, get_logger
 from kairos_core.topics import Topics
 from kairos_persistence import DurableMessageBus
 
 from .aggregation import SignalWindow, TextAggregate
+from .candidate import REJECTED_PAPER_STRATEGY_IDS, CandidateRouterPolicy
 from .config import RouterSettings
 from .fsm import RouterFSM, SymbolState
 
@@ -46,6 +53,11 @@ class RouterService:
             )
         self._clock = clock or (lambda: datetime.now(UTC))
         self.fsm = RouterFSM(self.settings.conflict_threshold, self.settings.calm_threshold)
+        self.candidate_policy = CandidateRouterPolicy(
+            source=self.settings.service_name,
+            review_timeout_ms=self.settings.candidate_review_timeout_ms,
+            max_evidence_ids=self.settings.max_candidate_evidence_ids,
+        )
         self.window = SignalWindow(
             sentiment_ttl_s=self.settings.sentiment_ttl_s,
             deadband=self.settings.sentiment_deadband,
@@ -56,8 +68,10 @@ class RouterService:
         self.system_mode = SystemMode.NORMAL
         self._processed_snapshots: OrderedDict[str, None] = OrderedDict()
         self._processed_sentiments: OrderedDict[str, None] = OrderedDict()
+        self._processed_intents: OrderedDict[str, None] = OrderedDict()
         self._snapshot_symbols: OrderedDict[str, str] = OrderedDict()
         self._sentiment_topics: OrderedDict[str, str] = OrderedDict()
+        self._intent_message_ids: OrderedDict[str, str] = OrderedDict()
         self._snapshot_watermarks: dict[str, datetime] = {}
 
     def _remember(self, cache: OrderedDict[str, None], message_id: str) -> None:
@@ -158,10 +172,114 @@ class RouterService:
 
     def _text_aggregate(self, snapshot: MarketSnapshot) -> TextAggregate:
         """Prefer fresh symbol evidence; use broadcast only when none exists."""
-        specific = self.window.aggregate(snapshot.symbol, as_of=snapshot.produced_at)
+        return self._text_aggregate_at(snapshot.symbol, as_of=snapshot.produced_at)
+
+    def _text_aggregate_at(self, symbol: str, *, as_of: datetime) -> TextAggregate:
+        """Prefer symbol evidence at a causal event time, then market-wide evidence."""
+        specific = self.window.aggregate(symbol, as_of=as_of)
         if specific.has_relevant_evidence:
             return specific
-        return self.window.aggregate("*", as_of=snapshot.produced_at)
+        return self.window.aggregate("*", as_of=as_of)
+
+    def _remember_intent_identity(self, message_id: str, intent_id: str) -> None:
+        self._intent_message_ids[message_id] = intent_id
+        self._intent_message_ids.move_to_end(message_id)
+        self._trim_identity_map(self._intent_message_ids)
+
+    def _candidate_rejection(
+        self,
+        intent: StrategyIntentV1,
+        route: CandidateRouteV1,
+        *,
+        now_ms: int,
+    ) -> str | None:
+        """Return a fail-closed reason without altering or rerouting the intent."""
+
+        if not self.settings.symbol_allowed(intent.symbol):
+            return "unsupported candidate symbol"
+        if self.settings.trading_mode is TradingMode.LIVE:
+            return "candidate LIVE routing is not enabled"
+        if (
+            self.settings.trading_mode is TradingMode.PAPER
+            and intent.strategy_id in REJECTED_PAPER_STRATEGY_IDS
+        ):
+            return "strategy is explicitly REJECTED for PAPER"
+        if self.settings.trading_mode is TradingMode.PAPER and not self.settings.paper_strategy_allowed(
+            intent.strategy_id,
+            intent.strategy_revision,
+        ):
+            return "strategy revision is not PAPER-approved"
+        future_tolerance_ms = int(self.settings.event_future_tolerance_s * 1_000)
+        if intent.decision_ts_ms > now_ms + future_tolerance_ms:
+            return "future-dated candidate"
+        if intent.decision_ts_ms > now_ms:
+            return "candidate postdates routing evaluation time"
+        if intent.decision_ts_ms < now_ms - int(self.settings.candidate_ttl_s * 1_000):
+            return "stale candidate"
+        if now_ms >= intent.entry_expires_ts_ms:
+            return "expired candidate"
+        if now_ms >= route.review_deadline_ms:
+            return "candidate review deadline has elapsed"
+        if self.system_mode is SystemMode.LOCAL_QUANT_MODE:
+            return "LOCAL_QUANT_MODE detaches the candidate review path"
+        if self.system_mode is SystemMode.CONFLICT_SAFE and route.review_tier is CandidateReviewTier.CONFLICT:
+            return "CONFLICT_SAFE suppresses unavailable conflict review"
+        return None
+
+    async def _process_intent(self, envelope: BusEnvelope) -> None:
+        """Validate, classify and publish one immutable strategy candidate."""
+
+        intent = StrategyIntentV1.model_validate(envelope.payload)
+        if intent.intent_id is None:  # impossible after strict contract validation
+            raise ValueError("strategy intent has no canonical identity")
+        prior_intent_id = self._intent_message_ids.get(intent.message_id)
+        if prior_intent_id is not None and prior_intent_id != intent.intent_id:
+            raise ValueError(f"intent message_id {intent.message_id!r} was reused across candidates")
+        if intent.intent_id in self._processed_intents:
+            return
+
+        event_time = datetime.fromtimestamp(intent.decision_ts_ms / 1_000, tz=UTC)
+        text = self._text_aggregate_at(intent.symbol, as_of=event_time)
+        route = self.candidate_policy.build(intent, text)
+        now_ms = int(self._now().timestamp() * 1_000)
+        rejection = self._candidate_rejection(intent, route, now_ms=now_ms)
+        if rejection is not None:
+            log.warning(
+                "router.candidate_rejected",
+                intent_id=intent.intent_id,
+                strategy_id=intent.strategy_id,
+                strategy_revision=intent.strategy_revision,
+                symbol=intent.symbol,
+                trading_mode=self.settings.trading_mode.value,
+                reason=rejection,
+            )
+            self._remember(self._processed_intents, intent.intent_id)
+            self._remember_intent_identity(intent.message_id, intent.intent_id)
+            return
+
+        await self.bus.publish(Topics.STRATEGY_ROUTE, route)
+        self._remember(self._processed_intents, intent.intent_id)
+        self._remember_intent_identity(intent.message_id, intent.intent_id)
+        log.info(
+            "router.candidate_routed",
+            intent_id=intent.intent_id,
+            route_id=route.route_id,
+            symbol=intent.symbol,
+            review_tier=route.review_tier.value,
+            review_deadline_ms=route.review_deadline_ms,
+        )
+
+    async def _consume_intents(self) -> None:
+        async for envelope in self.bus.subscribe(
+            Topics.STRATEGY_INTENT,
+            group="router",
+            consumer="candidate-intents",
+        ):
+            try:
+                await self._process_intent(envelope)
+                await self.bus.ack(Topics.STRATEGY_INTENT, envelope, group="router")
+            except Exception:
+                log.exception("router.candidate_processing_failed", envelope_id=envelope.id)
 
     async def _consume_sentiment(self) -> None:
         async for envelope in self.bus.subscribe(
@@ -210,6 +328,17 @@ class RouterService:
         if prior_symbol is not None and prior_symbol != normalized_symbol:
             raise ValueError(f"snapshot message_id {snapshot.message_id!r} was reused across symbols")
         if snapshot.message_id in self._processed_snapshots:
+            return
+        if self.settings.trading_mode is not TradingMode.DRY_RUN:
+            log.warning(
+                "router.legacy_snapshot_rejected",
+                snapshot_id=snapshot.message_id,
+                trading_mode=self.settings.trading_mode.value,
+                reason="legacy RouterDecision route is DRY_RUN-only",
+            )
+            self._remember(self._processed_snapshots, snapshot.message_id)
+            self._snapshot_symbols[snapshot.message_id] = normalized_symbol
+            self._trim_identity_map(self._snapshot_symbols)
             return
         if not self.settings.symbol_allowed(snapshot.symbol):
             log.warning("router.symbol_rejected", symbol=snapshot.symbol)
@@ -330,6 +459,7 @@ class RouterService:
                 tasks.create_task(self._consume_snapshots(), name="market-snapshots")
                 tasks.create_task(self._consume_sentiment(), name="sentiment-signals")
                 tasks.create_task(self._consume_control(), name="system-control")
+                tasks.create_task(self._consume_intents(), name="strategy-intents")
         finally:
             await self.close()
 

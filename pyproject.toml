@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kairos-router"
-version = "0.1.0"
-description = "Kairos Layer 2 — deterministic routing FSM with hysteresis."
+version = "0.2.0"
+description = "Kairos Layer 2 — deterministic legacy and strategy-candidate routing."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "TheLitis" }]
 dependencies = [
-    "kairos-core>=0.2,<0.3",
+    "kairos-core>=0.3,<0.4",
     "kairos-persistence>=0.1,<0.2",
 ]
 
@@ -29,8 +29,8 @@ dev = [
 required-version = "==0.12.3"
 
 [tool.uv.sources]
-kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "c2b9ba192521f9843b245e1eae8a501d408a6bfa" }
-kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "5709e7b8a1f9a11bc1727c2c23e39cdcd683f909" }
+kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "a4f427cdd44184fac62a842320133ac5a3e11fbe" }
+kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "48a26a9b0f7b14ceae5a3f19b3c403c10a08f255" }
 
 [project.scripts]
 kairos-router = "kairos_router.service:main"

@@ -1,9 +1,10 @@
 # kairos-router
 
-**Layer 2 — Router.** A deterministic finite-state machine with no LLM calls. It
-decides how much analytical effort the Aggregator may spend.
+**Layer 2 — Router.** A deterministic service with no LLM calls. It preserves the
+legacy DRY_RUN routing FSM and owns the separate candidate-specific route from the
+Strategy Engine to the Aggregator.
 
-## Routing policy
+## Legacy DRY_RUN routing policy
 
 - Only directional Quant plus directional, confidence-calibrated Text evidence can
   emit a routing decision. Missing, neutral, contradictory, or insufficiently
@@ -28,6 +29,36 @@ in its text score, newest-first by `(-produced_at, message_id)` for reproducible
 compilation. Confidence eligibility is applied before the newest-first evidence cap
 (`KAIROS_MAX_SENTIMENT_EVIDENCE`, default `5`), matching the Aggregator's compact context;
 newer low-confidence noise therefore cannot evict usable evidence.
+
+## Strategy candidate routing
+
+The PAPER-safe route consumes an immutable `StrategyIntentV1` and emits a
+`CandidateRouteV1`:
+
+```text
+kairos.strategy.intent.v1 -> Router -> kairos.strategy.route.v1
+```
+
+The Router never creates a side, stop, target, timeout or quantity. The complete
+intent is nested unchanged in the route and its canonical hash is revalidated by
+`kairos-core`.
+
+- No eligible directional Text evidence, or Text agreement with the strategy side,
+  selects `NORMAL` with `reasoning=medium`.
+- Fresh directional Text evidence opposite to the strategy side selects `CONFLICT`
+  with `reasoning=high` and a deterministic conflict rationale.
+- `evidence_ids` contains only the exact `SentimentSignal.message_id` values used in
+  that classification. Strategy, feature and bar provenance remains inside the intent.
+- Routing time and review deadline are anchored to the intent decision timestamp, so
+  identical causal inputs produce identical route bytes and IDs across retries and OSes.
+- Unsupported, future, stale, expired, deadline-missed and degraded-mode candidates
+  are terminal safe drops. A new closed bar must produce a new intent.
+
+PAPER adds an exact `<strategy_id>@<revision>` allowlist. It is empty by default, and
+the five Strategy Engine sleeves currently marked `REJECTED` are also hard-denied even
+if accidentally added to the allowlist. `LIVE` candidate routing is unconditionally
+disabled in this milestone. A canary/research fixture can be routed only after an
+explicit configuration entry; this does not promote strategy alpha.
 
 ## Degraded system modes
 
@@ -63,10 +94,14 @@ uv run --locked python -m kairos_router
 Inputs:
 
 - `kairos.market.snapshot`
+- `kairos.strategy.intent.v1`
 - `kairos.sentiment.signal`
 - `kairos.system.control`
 
-Output: `kairos.router.decision`.
+Outputs:
+
+- `kairos.router.decision` (legacy DRY_RUN)
+- `kairos.strategy.route.v1` (Strategy Parity / PAPER)
 
 ## Checks
 

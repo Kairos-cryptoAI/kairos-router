@@ -157,6 +157,19 @@ async def test_snapshot_ack_happens_only_after_publish():
     assert decision["produced_at"] == "2026-08-13T12:00:00Z"
 
 
+async def test_legacy_snapshot_route_is_disabled_outside_dry_run():
+    snapshot = _snapshot("BTCUSDT", Side.LONG, message_id="paper-legacy")
+    envelope = _envelope(Topics.MARKET_SNAPSHOT, snapshot.to_payload(), envelope_id="paper-bus")
+    bus = _FakeBus({Topics.MARKET_SNAPSHOT: [envelope]})
+    service = _service(bus, trading_mode="PAPER")
+    _seed_sentiment(service, _sentiment("BTCUSDT", Side.LONG, message_id="paper-text"))
+
+    await service._consume_snapshots()
+
+    assert bus.published == []
+    assert bus.operations == [("ack", Topics.MARKET_SNAPSHOT, "paper-bus")]
+
+
 async def test_failed_publish_is_not_acked_or_committed():
     snapshot = _snapshot("BTCUSDT", Side.LONG, message_id="snapshot-2")
     envelope = _envelope(Topics.MARKET_SNAPSHOT, snapshot.to_payload(), envelope_id="bus-2")
