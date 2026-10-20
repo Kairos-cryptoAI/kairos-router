@@ -550,6 +550,7 @@ version = "0.3.0"
 source = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=d52fd9734a27f76f8e2bdbf053d477b8e04b81c9#d52fd9734a27f76f8e2bdbf053d477b8e04b81c9" }
 dependencies = [
     { name = "aiohttp" },
+    { name = "multidict" },
     { name = "orjson" },
     { name = "prometheus-client" },
     { name = "pydantic" },
@@ -561,7 +562,7 @@ dependencies = [
 [[package]]
 name = "kairos-persistence"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=2d88a351fc045de5b58bbf6acae209341096a850#2d88a351fc045de5b58bbf6acae209341096a850" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=752c984ca276ccbb7fcbd1b60a6c75d95fe6f108#752c984ca276ccbb7fcbd1b60a6c75d95fe6f108" }
 dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
@@ -593,7 +594,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=d52fd9734a27f76f8e2bdbf053d477b8e04b81c9" },
-    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=2d88a351fc045de5b58bbf6acae209341096a850" },
+    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=752c984ca276ccbb7fcbd1b60a6c75d95fe6f108" },
 ]
 
 [package.metadata.requires-dev]
