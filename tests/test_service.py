@@ -531,6 +531,17 @@ async def test_neutral_symbol_evidence_does_not_fall_back_to_broadcast_direction
     assert bus.published == []
 
 
+def test_unconfigured_pair_evidence_never_becomes_market_wide():
+    service = _service(_FakeBus())
+    for topic in ("XRPUSDT", "  xrpusdt "):
+        _seed_sentiment(service, _sentiment(topic, Side.SHORT, message_id=topic.strip()))
+    _seed_sentiment(service, _sentiment("SEC ETF", Side.LONG, message_id="market"))
+
+    text = service._text_aggregate_at("BTCUSDT", as_of=FROZEN_NOW)
+    assert text.sentiment_ids == ("market",)
+    assert text.bias == Side.LONG
+
+
 async def test_future_sentiment_does_not_leak_into_earlier_snapshot():
     bus = _FakeBus()
     service = _service(bus, event_future_tolerance_s=2.0)

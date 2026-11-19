@@ -64,3 +64,10 @@ class RouterSettings(CoreSettings):
 
     def paper_strategy_allowed(self, strategy_id: str, strategy_revision: str) -> bool:
         return f"{strategy_id}@{strategy_revision}" in self.paper_strategy_allowlist
+
+    def sentiment_bucket(self, topic: str) -> str:
+        """Keep explicit market pairs scoped even when the current universe excludes them."""
+        symbol = topic.strip().upper()
+        if self.symbol_allowed(symbol) or (symbol.isalnum() and symbol.endswith("USDT")):
+            return symbol
+        return "*"

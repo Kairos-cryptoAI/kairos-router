@@ -105,7 +105,7 @@ class RouterService:
 
     def _process_sentiment(self, envelope: BusEnvelope) -> None:
         signal = SentimentSignal.model_validate(envelope.payload)
-        symbol = signal.topic.strip().upper() if self.settings.symbol_allowed(signal.topic) else "*"
+        symbol = self.settings.sentiment_bucket(signal.topic)
         prior_topic = self._sentiment_topics.get(signal.message_id)
         if prior_topic is not None and prior_topic != symbol:
             raise ValueError(f"sentiment message_id {signal.message_id!r} was reused across topics")
@@ -128,7 +128,6 @@ class RouterService:
             self._remember(self._processed_sentiments, signal.message_id)
             self._remember_sentiment_identity(signal.message_id, symbol)
             return
-        # An exact configured market is symbol-specific; news topics remain broadcasts.
         self.window.add_sentiment(
             symbol,
             message_id=signal.message_id,
